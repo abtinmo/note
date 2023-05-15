@@ -82,24 +82,20 @@ type NoteResponse struct {
 	Results []Note `json:"results"`
 }
 
-func day_to_nanosec(day int) int {
+func dayToNanoSec(day int) int {
 	return day * 8.64e+13
 }
 
 var tableName = "NoteTaking"
 
-func generateToken(user_id string) string {
+func generateToken(user_id string) (string, error) {
 	now_time := time.Now().UTC()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"exp":     now_time.Add(time.Duration(day_to_nanosec(180))).Unix(),
+		"exp":     now_time.Add(time.Duration(dayToNanoSec(180))).Unix(),
 		"iss":     now_time.Add(10000).Unix(),
 		"user_id": user_id,
 	})
-	access_token, err := token.SignedString(getKey())
-	if err != nil {
-		fmt.Println(err)
-	}
-	return access_token
+	return token.SignedString(getKey())
 }
 
 func validateTokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -115,8 +111,8 @@ func validateTokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
 					return getKey(), nil
 				})
 				if error != nil {
-					json.NewEncoder(w).Encode(ErrorMsg{Message: error.Error()})
 					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(ErrorMsg{Message: error.Error()})
 					return
 				}
 				if token.Valid {
@@ -124,16 +120,16 @@ func validateTokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
 					req := req.WithContext(context.WithValue(ctx, "claims", token.Claims))
 					next(w, req)
 				} else {
-					json.NewEncoder(w).Encode(ErrorMsg{Message: "Invalid authorization token"})
 					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(ErrorMsg{Message: "Invalid authorization token"})
 				}
 			} else {
-				json.NewEncoder(w).Encode(ErrorMsg{Message: "Invalid authorization token"})
 				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(ErrorMsg{Message: "Invalid authorization token"})
 			}
 		} else {
-			json.NewEncoder(w).Encode(ErrorMsg{Message: "An authorization header is required"})
 			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorMsg{Message: "An authorization header is required"})
 		}
 	})
 }
@@ -152,14 +148,17 @@ func create(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&note)
 	if err != nil {
-		println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorMsg{Message: err.Error()})
+		return
 	}
-	// save data in db
 	svc := getDynamoSession()
 
 	av, err := dynamodbattribute.MarshalMap(note)
 	if err != nil {
-		log.Fatalf("Got error marshalling new movie item: %s", err)
+		log.Fatalf("Got error marshalling new note: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -169,7 +168,11 @@ func create(w http.ResponseWriter, r *http.Request) {
 	_, err = svc.PutItem(input)
 	if err != nil {
 		log.Fatalf("Got error calling PutItem: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
+	w.WriteHeader(http.StatusCreated)
+	w.Header().Set("Content-Type", "application/json")
 }
 
 func update(w http.ResponseWriter, r *http.Request) {
@@ -215,11 +218,10 @@ func update(w http.ResponseWriter, r *http.Request) {
 	}
 	svc := getDynamoSession()
 
-	data, err := svc.UpdateItem(input)
-	fmt.Println(data)
-
-	if err != nil {
-		log.Fatalf("Got error calling UpdateItem: %s", err)
+	_, err1 := svc.UpdateItem(input)
+	if err1 != nil {
+		log.Fatalf("Error by updating note: %s", err1)
+		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
@@ -242,7 +244,9 @@ func delete(w http.ResponseWriter, r *http.Request) {
 	svc := getDynamoSession()
 	_, err := svc.DeleteItem(input)
 	if err != nil {
-		log.Fatalf("Got error calling DeleteItem: %s", err)
+		log.Fatalf("Error by deleting user from db: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 	w.Header().Set("Content-Type", "application/json")
@@ -250,7 +254,7 @@ func delete(w http.ResponseWriter, r *http.Request) {
 
 func get(w http.ResponseWriter, r *http.Request) {
 	user_id := r.Context().Value("claims").(jwt.MapClaims)["user_id"].(string)
-	//validate.Struct(user)
+	// validate.Struct(user)
 	user_notes := fmt.Sprintf("NOTE#%v", user_id)
 	svc := getDynamoSession()
 	var queryInput = &dynamodb.QueryInput{
@@ -268,14 +272,17 @@ func get(w http.ResponseWriter, r *http.Request) {
 	}
 	var resp1, err1 = svc.Query(queryInput)
 	if err1 != nil {
-		fmt.Printf("Cant find the user: %v", err1)
+		log.Fatalf("Error at geting user data from db: %s", err1)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	var notes []Note
 	err := dynamodbattribute.UnmarshalListOfMaps(resp1.Items, &notes)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error at unmarshaling user record: %s", err1)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	data := NoteResponse{Count: int(*resp1.Count), Results: notes}
 	w.WriteHeader(http.StatusOK)
@@ -294,7 +301,9 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	// Hashing the password with the default cost of 10
 	hashedPassword, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Can not generate hashed password: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	username := fmt.Sprintf("USERNAME#%v", user.Username)
 	uuid := ksuid.New()
@@ -325,17 +334,21 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	svc := getDynamoSession()
 	var resp1, err1 = svc.Query(queryInput)
 	if err1 != nil {
-		fmt.Printf("Cant find the user: %v", err)
+		log.Fatalf("Error at geting user data from db: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if *resp1.Count > 0 {
-		fmt.Printf("User already exists: %v", err)
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(ErrorMsg{Message: "User already exists."})
 		return
 	}
 	fmt.Println(err1)
 	av, err := dynamodbattribute.MarshalMap(&userRecord)
 	if err != nil {
-		fmt.Printf("Got error marshalling new movie item: %v", err)
+		log.Fatalf("Error at unmarshaling user record: %s", err1)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -346,7 +359,12 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmt.Printf("Got error calling PutItem: %s", err)
 	}
-	access_token := generateToken(uuid.String())
+	access_token, err := generateToken(uuid.String())
+	if err != nil {
+		log.Fatalf("Can not create jwt token: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	data := RegisterResponse{AccessToken: access_token}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -373,34 +391,43 @@ func loginUser(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-	var resp1, err1 = svc.Query(queryInput)
-	if err1 != nil {
-		fmt.Printf("Cant find the user: %v", err1)
+	var resp1, err = svc.Query(queryInput)
+	if err != nil {
+		log.Fatalf("Error at geting user data from db: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if *resp1.Count <= 0 {
-		fmt.Printf("User not found")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorMsg{Message: "User not found."})
 		return
 	}
-	type UserRecord struct {
-		Pk       string `json:"pk" validate:"required"`
+	type UserAuthRecord struct {
 		Sk       string `json:"sk" validate:"required"`
 		Password string `json:"password" validate:"required"`
 	}
-	var db_users []UserRecord
-	err := dynamodbattribute.UnmarshalListOfMaps(resp1.Items, &db_users)
-	if err != nil {
-		panic(err)
+	var db_users []UserAuthRecord
+	err1 := dynamodbattribute.UnmarshalListOfMaps(resp1.Items, &db_users)
+	if err1 != nil {
+		log.Fatalf("Error at unmarshaling user record: %s", err1)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	db_user := db_users[0]
 	err = bcrypt.CompareHashAndPassword([]byte(db_user.Password), []byte(user.Password))
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorMsg{Message: "Wrong Password."})
 		return
 	}
-	data := RegisterResponse{AccessToken: generateToken(db_user.Sk)}
+	access_token, err := generateToken(db_user.Sk)
+	if err != nil {
+		log.Fatalf("Can not create jwt token: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	data := RegisterResponse{AccessToken: access_token}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(data)
 }
 
