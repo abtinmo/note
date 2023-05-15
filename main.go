@@ -1,12 +1,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -15,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/segmentio/ksuid"
@@ -40,6 +38,11 @@ func getDynamoSession() *dynamodb.DynamoDB {
 		Credentials: creds,
 	})
 	return dynamodb.New(sess)
+}
+
+func getUserIdFromContext(c *gin.Context) string {
+	claim := c.MustGet("claims")
+	return claim.(jwt.MapClaims)["user_id"].(string)
 }
 
 type Note struct {
@@ -98,45 +101,42 @@ func generateToken(user_id string) (string, error) {
 	return token.SignedString(getKey())
 }
 
-func validateTokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		authorizationHeader := req.Header.Get("authorization")
-		if authorizationHeader != "" {
-			bearerToken := strings.Split(authorizationHeader, " ")
-			if len(bearerToken) == 2 {
-				token, error := jwt.Parse(bearerToken[1], func(token *jwt.Token) (interface{}, error) {
-					if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-						return nil, fmt.Errorf("There was an error")
-					}
-					return getKey(), nil
-				})
-				if error != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					json.NewEncoder(w).Encode(ErrorMsg{Message: error.Error()})
-					return
-				}
-				if token.Valid {
-					ctx := req.Context()
-					req := req.WithContext(context.WithValue(ctx, "claims", token.Claims))
-					next(w, req)
-				} else {
-					w.WriteHeader(http.StatusBadRequest)
-					json.NewEncoder(w).Encode(ErrorMsg{Message: "Invalid authorization token"})
-				}
-			} else {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(ErrorMsg{Message: "Invalid authorization token"})
-			}
-		} else {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ErrorMsg{Message: "An authorization header is required"})
+func validateTokenMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		auth_token := c.Request.Header.Get("authorization")
+		if auth_token == "" {
+			c.JSON(400, gin.H{"message": "An authorization header is required."})
+			c.Abort()
 		}
-	})
+		bearerToken := strings.Split(auth_token, " ")
+		if len(bearerToken) != 2 {
+			c.JSON(400, gin.H{"message": "Invalid authorization token."})
+			c.Abort()
+		}
+		token, error := jwt.Parse(bearerToken[1], func(token *jwt.Token) (interface{}, error) {
+			if _, err := token.Method.(*jwt.SigningMethodHMAC); !err {
+				log.Fatalf("Error while parrsing token %v", err)
+				return nil, fmt.Errorf("There was an error.")
+			}
+			return getKey(), nil
+		})
+		if error != nil {
+			c.JSON(400, gin.H{"message": error.Error()})
+			c.Abort()
+		}
+		if !token.Valid {
+			c.JSON(400, gin.H{"message": "Invalid authorization token."})
+			c.Abort()
+		}
+		c.Set("claims", token.Claims)
+		c.Next()
+	}
+
 }
 
-func create(w http.ResponseWriter, r *http.Request) {
+func create(c *gin.Context) {
 	uuid := ksuid.New()
-	user_id := r.Context().Value("claims").(jwt.MapClaims)["user_id"].(string)
+	user_id := getUserIdFromContext(c)
 	user_notes := fmt.Sprintf("NOTE#%v", user_id)
 	now_time := time.Now().UTC()
 	note := NoteCreate{
@@ -145,20 +145,19 @@ func create(w http.ResponseWriter, r *http.Request) {
 		CreateDate: now_time.String(),
 		UpdateDate: now_time.String(),
 	}
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(c.Request.Body)
 	err := decoder.Decode(&note)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorMsg{Message: err.Error()})
-		return
+		c.JSON(400, gin.H{"message": err.Error()})
+		c.Abort()
 	}
 	svc := getDynamoSession()
 
 	av, err := dynamodbattribute.MarshalMap(note)
 	if err != nil {
 		log.Fatalf("Got error marshalling new note: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -168,22 +167,21 @@ func create(w http.ResponseWriter, r *http.Request) {
 	_, err = svc.PutItem(input)
 	if err != nil {
 		log.Fatalf("Got error calling PutItem: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
-	w.WriteHeader(http.StatusCreated)
-	w.Header().Set("Content-Type", "application/json")
+	c.JSON(201, nil)
 }
 
-func update(w http.ResponseWriter, r *http.Request) {
-	user_id := r.Context().Value("claims").(jwt.MapClaims)["user_id"].(string)
+func update(c *gin.Context) {
+	user_id := getUserIdFromContext(c)
 	user_notes := fmt.Sprintf("NOTE#%v", user_id)
-	note_id := r.URL.Query().Get("note_id")
+	note_id := c.Param("note_id")
 	now_time := time.Now().UTC()
 	note := NoteUpdate{
 		UpdateDate: now_time.String(),
 	}
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(c.Request.Body)
 	err := decoder.Decode(&note)
 	if err != nil {
 		println(err)
@@ -221,14 +219,14 @@ func update(w http.ResponseWriter, r *http.Request) {
 	_, err1 := svc.UpdateItem(input)
 	if err1 != nil {
 		log.Fatalf("Error by updating note: %s", err1)
-		w.WriteHeader(http.StatusInternalServerError)
+		c.JSON(500, gin.H{"message": "Internal server error."})
 	}
 }
 
-func delete(w http.ResponseWriter, r *http.Request) {
-	user_id := r.Context().Value("claims").(jwt.MapClaims)["user_id"].(string)
+func delete(c *gin.Context) {
+	user_id := getUserIdFromContext(c)
 	user_notes := fmt.Sprintf("NOTE#%v", user_id)
-	note_id := r.URL.Query().Get("note_id")
+	note_id := c.Param("note_id")
 
 	input := &dynamodb.DeleteItemInput{
 		Key: map[string]*dynamodb.AttributeValue{
@@ -245,15 +243,14 @@ func delete(w http.ResponseWriter, r *http.Request) {
 	_, err := svc.DeleteItem(input)
 	if err != nil {
 		log.Fatalf("Error by deleting user from db: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
-	w.WriteHeader(http.StatusNoContent)
-	w.Header().Set("Content-Type", "application/json")
+	c.JSON(204, nil)
 }
 
-func get(w http.ResponseWriter, r *http.Request) {
-	user_id := r.Context().Value("claims").(jwt.MapClaims)["user_id"].(string)
+func getNotes(c *gin.Context) {
+	user_id := getUserIdFromContext(c)
 	// validate.Struct(user)
 	user_notes := fmt.Sprintf("NOTE#%v", user_id)
 	svc := getDynamoSession()
@@ -273,27 +270,25 @@ func get(w http.ResponseWriter, r *http.Request) {
 	var resp1, err1 = svc.Query(queryInput)
 	if err1 != nil {
 		log.Fatalf("Error at geting user data from db: %s", err1)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 
 	var notes []Note
 	err := dynamodbattribute.UnmarshalListOfMaps(resp1.Items, &notes)
 	if err != nil {
 		log.Fatalf("Error at unmarshaling user record: %s", err1)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	data := NoteResponse{Count: int(*resp1.Count), Results: notes}
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(data)
-	w.Header().Set("Content-Type", "application/json")
+	c.JSON(200, data)
 }
 
-func registerUser(w http.ResponseWriter, r *http.Request) {
+func registerUser(c *gin.Context) {
 	// get username and password and register the user, return access token in response
 	var user UserRegisterRequest
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(c.Request.Body)
 	decoder.Decode(&user)
 	//validate.Struct(user)
 	password := []byte(user.Password)
@@ -302,8 +297,8 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	hashedPassword, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 	if err != nil {
 		log.Fatalf("Can not generate hashed password: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	username := fmt.Sprintf("USERNAME#%v", user.Username)
 	uuid := ksuid.New()
@@ -335,20 +330,19 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 	var resp1, err1 = svc.Query(queryInput)
 	if err1 != nil {
 		log.Fatalf("Error at geting user data from db: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	if *resp1.Count > 0 {
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(ErrorMsg{Message: "User already exists."})
-		return
+		c.JSON(409, gin.H{"message": "User already exists."})
+		c.Abort()
 	}
 	fmt.Println(err1)
 	av, err := dynamodbattribute.MarshalMap(&userRecord)
 	if err != nil {
 		log.Fatalf("Error at unmarshaling user record: %s", err1)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -357,23 +351,22 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 
 	_, err = svc.PutItem(input)
 	if err != nil {
-		fmt.Printf("Got error calling PutItem: %s", err)
+		log.Fatalf("Got error calling PutItem: %s", err)
+		c.JSON(500, gin.H{"message": "Internal server error."})
 	}
 	access_token, err := generateToken(uuid.String())
 	if err != nil {
 		log.Fatalf("Can not create jwt token: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	data := RegisterResponse{AccessToken: access_token}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(data)
+	c.JSON(201, data)
 }
 
-func loginUser(w http.ResponseWriter, r *http.Request) {
+func loginUser(c *gin.Context) {
 	var user UserRegisterRequest
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(c.Request.Body)
 	decoder.Decode(&user)
 	username := fmt.Sprintf("USERNAME#%v", user.Username)
 	svc := getDynamoSession()
@@ -394,13 +387,12 @@ func loginUser(w http.ResponseWriter, r *http.Request) {
 	var resp1, err = svc.Query(queryInput)
 	if err != nil {
 		log.Fatalf("Error at geting user data from db: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	if *resp1.Count <= 0 {
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(ErrorMsg{Message: "User not found."})
-		return
+		c.JSON(404, gin.H{"message": "User not found."})
+		c.Abort()
 	}
 	type UserAuthRecord struct {
 		Sk       string `json:"sk" validate:"required"`
@@ -410,37 +402,34 @@ func loginUser(w http.ResponseWriter, r *http.Request) {
 	err1 := dynamodbattribute.UnmarshalListOfMaps(resp1.Items, &db_users)
 	if err1 != nil {
 		log.Fatalf("Error at unmarshaling user record: %s", err1)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	db_user := db_users[0]
 	err = bcrypt.CompareHashAndPassword([]byte(db_user.Password), []byte(user.Password))
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorMsg{Message: "Wrong Password."})
-		return
+		c.JSON(400, gin.H{"message": "Password is worng."})
+		c.Abort()
 	}
 	access_token, err := generateToken(db_user.Sk)
 	if err != nil {
-		log.Fatalf("Can not create jwt token: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		c.JSON(500, gin.H{"message": "Internal server error."})
+		c.Abort()
 	}
 	data := RegisterResponse{AccessToken: access_token}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	c.JSON(200, data)
+
 }
 
 func main() {
-	http.HandleFunc("/register", registerUser)
-	http.HandleFunc("/login", loginUser)
-	http.HandleFunc("/get", validateTokenMiddleware(get))
-	http.HandleFunc("/create", validateTokenMiddleware(create))
-	http.HandleFunc("/update", validateTokenMiddleware(update))
-	http.HandleFunc("/delete", validateTokenMiddleware(delete))
-
-	err := http.ListenAndServe(":3333", nil)
-	if err != nil {
-		os.Exit(1)
-	}
+	r := gin.Default()
+	auth_required_endpints := r.Group("/")
+	auth_required_endpints.Use(validateTokenMiddleware())
+	auth_required_endpints.GET("/note/", getNotes)
+	auth_required_endpints.POST("/note/", create)
+	auth_required_endpints.PUT("/note/:note_id/", update)
+	auth_required_endpints.DELETE("/note/:note_id/", delete)
+	r.POST("/register/", registerUser)
+	r.POST("/login/", loginUser)
+	r.Run()
 }
