@@ -1,28 +1,31 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/segmentio/ksuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
-var validate validator.Validate
-
 func getKey() []byte {
-	var str = "hello boss!"
+	var str = os.Getenv("SECRET_KEY")
 	key := []byte(str)
 	return key
 }
@@ -34,7 +37,7 @@ type ErrorMsg struct {
 func getDynamoSession() *dynamodb.DynamoDB {
 	creds := credentials.NewEnvCredentials()
 	sess, _ := session.NewSession(&aws.Config{
-		Region:      aws.String("eu-central-1"),
+		Region:      aws.String(os.Getenv("AWS_REGION")),
 		Credentials: creds,
 	})
 	return dynamodb.New(sess)
@@ -55,11 +58,11 @@ type Note struct {
 }
 
 type NoteCreate struct {
-	Id         string `json:"sk" validate:"required"`
-	Pk         string `json:"pk" validate:"required"`
-	Title      string `json:"title" validate:"required"`
-	Body       string `json:"body" validate:"required"`
-	Tag        string `json:"tag,omitempty" validate:"required"`
+	Id         string `json:"sk"`
+	Pk         string `json:"pk"`
+	Title      string `json:"title" binding:"required"`
+	Body       string `json:"body" binding:"required"`
+	Tag        string `json:"tag,omitempty" binding:"required"`
 	CreateDate string `json:"create_date,omitempty"`
 	UpdateDate string `json:"update_date,omitempty"`
 }
@@ -72,7 +75,7 @@ type NoteUpdate struct {
 }
 
 type UserRegisterRequest struct {
-	Password string `json:"password" validate:"required"`
+	Password string `json:"password" validate:"required,email"`
 	Username string `json:"username" validate:"required"`
 }
 
@@ -106,12 +109,12 @@ func validateTokenMiddleware() gin.HandlerFunc {
 		auth_token := c.Request.Header.Get("authorization")
 		if auth_token == "" {
 			c.JSON(400, gin.H{"message": "An authorization header is required."})
-			c.Abort()
+			return
 		}
 		bearerToken := strings.Split(auth_token, " ")
 		if len(bearerToken) != 2 {
 			c.JSON(400, gin.H{"message": "Invalid authorization token."})
-			c.Abort()
+			return
 		}
 		token, error := jwt.Parse(bearerToken[1], func(token *jwt.Token) (interface{}, error) {
 			if _, err := token.Method.(*jwt.SigningMethodHMAC); !err {
@@ -122,11 +125,11 @@ func validateTokenMiddleware() gin.HandlerFunc {
 		})
 		if error != nil {
 			c.JSON(400, gin.H{"message": error.Error()})
-			c.Abort()
+			return
 		}
 		if !token.Valid {
 			c.JSON(400, gin.H{"message": "Invalid authorization token."})
-			c.Abort()
+			return
 		}
 		c.Set("claims", token.Claims)
 		c.Next()
@@ -145,19 +148,14 @@ func create(c *gin.Context) {
 		CreateDate: now_time.String(),
 		UpdateDate: now_time.String(),
 	}
-	decoder := json.NewDecoder(c.Request.Body)
-	err := decoder.Decode(&note)
-	if err != nil {
-		c.JSON(400, gin.H{"message": err.Error()})
-		c.Abort()
-	}
+	c.ShouldBindJSON(&note)
 	svc := getDynamoSession()
 
 	av, err := dynamodbattribute.MarshalMap(note)
 	if err != nil {
 		log.Fatalf("Got error marshalling new note: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -168,7 +166,7 @@ func create(c *gin.Context) {
 	if err != nil {
 		log.Fatalf("Got error calling PutItem: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	c.JSON(201, nil)
 }
@@ -244,7 +242,7 @@ func delete(c *gin.Context) {
 	if err != nil {
 		log.Fatalf("Error by deleting user from db: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	c.JSON(204, nil)
 }
@@ -271,7 +269,7 @@ func getNotes(c *gin.Context) {
 	if err1 != nil {
 		log.Fatalf("Error at geting user data from db: %s", err1)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 
 	var notes []Note
@@ -279,7 +277,7 @@ func getNotes(c *gin.Context) {
 	if err != nil {
 		log.Fatalf("Error at unmarshaling user record: %s", err1)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	data := NoteResponse{Count: int(*resp1.Count), Results: notes}
 	c.JSON(200, data)
@@ -298,7 +296,7 @@ func registerUser(c *gin.Context) {
 	if err != nil {
 		log.Fatalf("Can not generate hashed password: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	username := fmt.Sprintf("USERNAME#%v", user.Username)
 	uuid := ksuid.New()
@@ -331,18 +329,18 @@ func registerUser(c *gin.Context) {
 	if err1 != nil {
 		log.Fatalf("Error at geting user data from db: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	if *resp1.Count > 0 {
 		c.JSON(409, gin.H{"message": "User already exists."})
-		c.Abort()
+		return
 	}
 	fmt.Println(err1)
 	av, err := dynamodbattribute.MarshalMap(&userRecord)
 	if err != nil {
 		log.Fatalf("Error at unmarshaling user record: %s", err1)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	input := &dynamodb.PutItemInput{
 		Item:      av,
@@ -353,12 +351,13 @@ func registerUser(c *gin.Context) {
 	if err != nil {
 		log.Fatalf("Got error calling PutItem: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
+		return
 	}
 	access_token, err := generateToken(uuid.String())
 	if err != nil {
 		log.Fatalf("Can not create jwt token: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	data := RegisterResponse{AccessToken: access_token}
 	c.JSON(201, data)
@@ -388,11 +387,11 @@ func loginUser(c *gin.Context) {
 	if err != nil {
 		log.Fatalf("Error at geting user data from db: %s", err)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	if *resp1.Count <= 0 {
 		c.JSON(404, gin.H{"message": "User not found."})
-		c.Abort()
+		return
 	}
 	type UserAuthRecord struct {
 		Sk       string `json:"sk" validate:"required"`
@@ -403,25 +402,27 @@ func loginUser(c *gin.Context) {
 	if err1 != nil {
 		log.Fatalf("Error at unmarshaling user record: %s", err1)
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	db_user := db_users[0]
 	err = bcrypt.CompareHashAndPassword([]byte(db_user.Password), []byte(user.Password))
 	if err != nil {
 		c.JSON(400, gin.H{"message": "Password is worng."})
-		c.Abort()
+		return
 	}
 	access_token, err := generateToken(db_user.Sk)
 	if err != nil {
 		c.JSON(500, gin.H{"message": "Internal server error."})
-		c.Abort()
+		return
 	}
 	data := RegisterResponse{AccessToken: access_token}
 	c.JSON(200, data)
-
 }
 
-func main() {
+var ginLambda *ginadapter.GinLambdaV2
+
+func init() {
+	// stdout and stderr are sent to AWS CloudWatch Logs
 	r := gin.Default()
 	auth_required_endpints := r.Group("/")
 	auth_required_endpints.Use(validateTokenMiddleware())
@@ -431,5 +432,18 @@ func main() {
 	auth_required_endpints.DELETE("/note/:note_id/", delete)
 	r.POST("/register/", registerUser)
 	r.POST("/login/", loginUser)
-	r.Run()
+	r.GET("/ping", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "pong",
+		})
+	})
+	ginLambda = ginadapter.NewV2(r)
+}
+
+func Handler(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) { // If no name is provided in the HTTP request body, throw an error
+	return ginLambda.ProxyWithContext(ctx, req)
+}
+
+func main() {
+	lambda.Start(Handler)
 }
