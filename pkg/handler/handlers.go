@@ -4,32 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	jwtauth "github.com/abtinmo/note/pkg/auth"
 	database "github.com/abtinmo/note/pkg/db"
 	models "github.com/abtinmo/note/pkg/model"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/segmentio/ksuid"
 	"golang.org/x/crypto/bcrypt"
 )
-
-func getDynamoSession() *dynamodb.DynamoDB {
-	creds := credentials.NewEnvCredentials()
-	sess, _ := session.NewSession(&aws.Config{
-		Region:      aws.String(os.Getenv("AWS_REGION")),
-		Credentials: creds,
-	})
-	return dynamodb.New(sess)
-}
 
 func getUserIdFromContext(c *gin.Context) string {
 	claim := c.MustGet("claims")
@@ -40,8 +26,7 @@ var tableName = "NoteTaking"
 
 func CreateNote(c *gin.Context) {
 	uuid := ksuid.New()
-	user_id := getUserIdFromContext(c)
-	user_notes := fmt.Sprintf("NOTE#%v", user_id)
+	user_notes := fmt.Sprintf("NOTE#%v", getUserIdFromContext(c))
 	now_time := time.Now().UTC()
 	note := models.NoteCreate{
 		Id:         uuid.String(),
@@ -59,12 +44,10 @@ func CreateNote(c *gin.Context) {
 }
 
 func UpdateNote(c *gin.Context) {
-	user_id := getUserIdFromContext(c)
-	now_time := time.Now().UTC()
 	note := models.NoteUpdate{
-		UpdateDate: now_time.String(),
+		UpdateDate: time.Now().UTC().String(),
 		Id:         c.Param("note_id"),
-		UserId:     fmt.Sprintf("NOTE#%v", user_id),
+		UserId:     fmt.Sprintf("NOTE#%v", getUserIdFromContext(c)),
 	}
 	decoder := json.NewDecoder(c.Request.Body)
 	err := decoder.Decode(&note)
@@ -93,7 +76,6 @@ func DeleteNote(c *gin.Context) {
 
 func GetNotes(c *gin.Context) {
 	user_id := getUserIdFromContext(c)
-	// validate.Struct(user)
 	user_pk := fmt.Sprintf("NOTE#%v", user_id)
 	response, err := database.GetNotes(user_pk)
 	if err.Message != "" {
