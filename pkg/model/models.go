@@ -16,17 +16,17 @@ type Note struct {
 
 type NoteCreate struct {
 	Id         string `json:"sk"`
-	Pk         string `json:"pk"`
+	Pk         string `json:"pk" binding:"required,startswith=NOTE#"`
 	Title      string `json:"title" binding:"required"`
 	Body       string `json:"body" binding:"required"`
 	Tag        string `json:"tag,omitempty" binding:"required"`
-	CreateDate string `json:"create_date,omitempty"`
-	UpdateDate string `json:"update_date,omitempty"`
+	CreateDate string `json:"create_date"`
+	UpdateDate string `json:"update_date"`
 }
 
 type NoteUpdate struct {
-	Id         string
-	UserId     string
+	Sk         string `json:"id"`
+	Pk         string `json:"pk" binding:"required,startswith=NOTE#"`
 	Title      string `json:"title" validate:"required"`
 	Body       string `json:"body" validate:"required"`
 	Tag        string `json:"tag,omitempty" validate:"required"`
@@ -39,16 +39,16 @@ type NoteResponse struct {
 }
 
 type User struct {
-	Pk       string `json:"pk" validate:"required"`
-	Sk       string `json:"sk" validate:"required"`
-	Password string `json:"password" validate:"required"`
+	Pk       string `json:"pk" binding:"required,startswith=USERNAME#"`
+	Sk       string `json:"sk" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 type UserAuthRequest struct {
-	Password string `json:"password" validate:"required,email"`
-	Username string `json:"username" validate:"required"`
+	Password string `json:"password" binding:"required,min=8,max=255"`
+	Username string `json:"username" binding:"required,email"`
 }
 
 type UserAccessToken struct {
-	AccessToken string `json:"acces_token" validate:"required"`
+	AccessToken string `json:"acces_token"`
 }

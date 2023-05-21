@@ -61,10 +61,10 @@ func UpdateNote(note *models.NoteUpdate) models.ErrorModel {
 		TableName: aws.String(tableName),
 		Key: map[string]*dynamodb.AttributeValue{
 			"pk": {
-				S: aws.String(note.UserId),
+				S: aws.String(note.Pk),
 			},
 			"sk": {
-				S: aws.String(note.Id),
+				S: aws.String(note.Sk),
 			},
 		},
 		ReturnValues:     aws.String("UPDATED_NEW"),

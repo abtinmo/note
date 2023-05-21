@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -34,7 +33,10 @@ func CreateNote(c *gin.Context) {
 		CreateDate: now_time.String(),
 		UpdateDate: now_time.String(),
 	}
-	c.ShouldBindJSON(&note)
+	if err := c.ShouldBindJSON(&note); err != nil {
+		c.JSON(400, gin.H{"message": err.Error()})
+		return
+	}
 	err := database.CreateNote(&note)
 	if err.Message != "" {
 		c.JSON(err.Code, gin.H{"message": err.Message})
@@ -46,13 +48,11 @@ func CreateNote(c *gin.Context) {
 func UpdateNote(c *gin.Context) {
 	note := models.NoteUpdate{
 		UpdateDate: time.Now().UTC().String(),
-		Id:         c.Param("note_id"),
-		UserId:     fmt.Sprintf("NOTE#%v", getUserIdFromContext(c)),
+		Sk:         c.Param("note_id"),
+		Pk:         fmt.Sprintf("NOTE#%v", getUserIdFromContext(c)),
 	}
-	decoder := json.NewDecoder(c.Request.Body)
-	err := decoder.Decode(&note)
-	if err != nil {
-		c.JSON(500, gin.H{"message": err.Error()})
+	if err := c.ShouldBindJSON(&note); err != nil {
+		c.JSON(400, gin.H{"message": err.Error()})
 		return
 	}
 	err1 := database.UpdateNote(&note)
@@ -88,8 +88,10 @@ func GetNotes(c *gin.Context) {
 func RegisterUser(c *gin.Context) {
 	// get username and password and register the user, return access token in response
 	var userRegisterRequest models.UserAuthRequest
-	decoder := json.NewDecoder(c.Request.Body)
-	decoder.Decode(&userRegisterRequest)
+	if err := c.ShouldBindJSON(&userRegisterRequest); err != nil {
+		c.JSON(400, gin.H{"message": err.Error()})
+		return
+	}
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(userRegisterRequest.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Fatalf("Can not generate hashed password: %s", err)
@@ -128,8 +130,10 @@ func RegisterUser(c *gin.Context) {
 
 func LoginUser(c *gin.Context) {
 	var userLoginRequest models.UserAuthRequest
-	decoder := json.NewDecoder(c.Request.Body)
-	decoder.Decode(&userLoginRequest)
+	if err := c.ShouldBindJSON(&userLoginRequest); err != nil {
+		c.JSON(400, gin.H{"message": err.Error()})
+		return
+	}
 	userName := fmt.Sprintf("USERNAME#%v", userLoginRequest.Username)
 	var resp1, err = database.GetUser(userName)
 	if err != nil {
